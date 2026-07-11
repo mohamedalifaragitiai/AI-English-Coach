@@ -120,7 +120,7 @@ SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 - [x] Phase 1: Persistence & per-user profiles
 - [x] Phase 2: Model serving through guard
 - [x] Phase 3: Hot path (VAD → STT → LLM → TTS)
-- [ ] Phase 4: Cold path evaluation & scoring
+- [x] Phase 4: Cold path evaluation & scoring
 - [ ] Phase 5: Gap analysis, plans, reports
 - [ ] Phase 6: Dashboard
 - [ ] Phase 7: Hardening

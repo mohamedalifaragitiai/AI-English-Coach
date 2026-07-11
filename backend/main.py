@@ -12,13 +12,21 @@ from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.users import router as users_router
-from backend.hotpath.ws_session import ConversationSession, SessionConfig
+from backend.coldpath import (
+    ColdPathOrchestrator,
+    FluencyEvaluator,
+    GrammarEvaluator,
+    PronunciationEvaluator,
+    get_registry,
+)
 from backend.core.event_bus import EventBus
 from backend.core.logging import get_logger, setup_logging
 from backend.core.metrics import get_metrics, get_metrics_content_type
 from backend.core.model_manager import ModelManager
 from backend.core.resource_guard import ResourceGuard
+from backend.hotpath.ws_session import ConversationSession, SessionConfig
 from backend.persistence import close_database, init_database
+from backend.persistence.repositories import AssessmentRepository
 from config.settings import get_settings
 
 logger = get_logger(__name__)
@@ -27,12 +35,13 @@ logger = get_logger(__name__)
 resource_guard: ResourceGuard | None = None
 event_bus: EventBus | None = None
 model_manager: ModelManager | None = None
+cold_path_orchestrator: ColdPathOrchestrator | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan - startup and shutdown."""
-    global resource_guard, event_bus, model_manager
+    global resource_guard, event_bus, model_manager, cold_path_orchestrator
 
     settings = get_settings()
     setup_logging(settings.log_level, json_output=settings.log_level != "DEBUG")
@@ -89,6 +98,31 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("models_skipped", reason="SKIP_MODELS=1")
         app.state.model_manager = None
 
+    # Initialize cold path evaluators and orchestrator
+    registry = get_registry()
+    registry.register(PronunciationEvaluator(resource_guard))
+    registry.register(GrammarEvaluator(
+        resource_guard,
+        ollama_host=settings.model.ollama_host,
+        model=settings.model.llm_model,
+    ))
+    registry.register(FluencyEvaluator(resource_guard))
+
+    # Create cold path orchestrator
+    assessment_repo = AssessmentRepository(database)
+    cold_path_orchestrator = ColdPathOrchestrator(
+        event_bus=event_bus,
+        guard=resource_guard,
+        assessment_repo=assessment_repo,
+    )
+    await cold_path_orchestrator.start()
+    app.state.cold_path_orchestrator = cold_path_orchestrator
+
+    logger.info(
+        "cold_path_initialized",
+        evaluators=len(registry),
+    )
+
     logger.info(
         "startup_complete",
         gpu_available=resource_guard.has_gpu,
@@ -100,6 +134,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Shutdown
     logger.info("shutdown_begin")
+
+    if cold_path_orchestrator:
+        await cold_path_orchestrator.stop()
 
     if model_manager:
         await model_manager.shutdown()
@@ -148,6 +185,8 @@ def create_app() -> FastAPI:
         guard = app.state.resource_guard
         snapshot = guard.snapshot() if guard else None
         mm = getattr(app.state, "model_manager", None)
+        cpo = getattr(app.state, "cold_path_orchestrator", None)
+        registry = get_registry()
 
         return {
             "status": "healthy",
@@ -159,6 +198,11 @@ def create_app() -> FastAPI:
             "event_bus": {
                 "running": app.state.event_bus.is_running if app.state.event_bus else False,
                 "queue_size": app.state.event_bus.queue_size if app.state.event_bus else 0,
+            },
+            "cold_path": {
+                "running": cpo._running if cpo else False,
+                "evaluators": len(registry),
+                "skills": [s.value for s in registry.skills],
             },
             "models": mm.models_status if mm and mm.is_initialized else None,
             "resources": snapshot.to_dict() if snapshot else None,
