@@ -8,10 +8,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.users import router as users_router
+from backend.hotpath.ws_session import ConversationSession, SessionConfig
 from backend.core.event_bus import EventBus
 from backend.core.logging import get_logger, setup_logging
 from backend.core.metrics import get_metrics, get_metrics_content_type
@@ -170,6 +171,53 @@ def create_app() -> FastAPI:
             content=get_metrics(),
             media_type=get_metrics_content_type(),
         )
+
+    @app.websocket("/ws/conversation/{user_id}")
+    async def websocket_conversation(
+        websocket: WebSocket,
+        user_id: str,
+        mode: str = Query(default="free"),
+        level: int = Query(default=0, ge=0, le=6),
+    ) -> None:
+        """WebSocket endpoint for live conversation.
+
+        Handles the real-time audio loop:
+        mic → VAD → STT → LLM → TTS → speaker
+
+        Args:
+            websocket: WebSocket connection
+            user_id: User identifier
+            mode: Session mode (free, roleplay, etc.)
+            level: Learner CEFR level (0-6)
+        """
+        mm = getattr(app.state, "model_manager", None)
+        guard = app.state.resource_guard
+        bus = app.state.event_bus
+
+        if not mm or not mm.is_initialized:
+            await websocket.accept()
+            await websocket.send_json({
+                "type": "error",
+                "error": "Models not loaded. Start server without SKIP_MODELS=1.",
+            })
+            await websocket.close(code=1011)
+            return
+
+        config = SessionConfig(
+            user_id=user_id,
+            mode=mode,
+            learner_level=level,
+        )
+
+        session = ConversationSession(
+            websocket=websocket,
+            config=config,
+            model_manager=mm,
+            guard=guard,
+            event_bus=bus,
+        )
+
+        await session.run()
 
     return app
 

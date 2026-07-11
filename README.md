@@ -79,6 +79,12 @@ english-coach/
 - `GET /health` - Detailed health with resource status
 - `GET /metrics` - Prometheus metrics
 
+### WebSocket
+- `WS /ws/conversation/{user_id}` - Live conversation session
+  - Query params: `mode` (free/roleplay), `level` (0-6 CEFR)
+  - Receives: Binary audio (16-bit PCM, 16kHz, mono) or JSON control messages
+  - Sends: JSON messages (state, transcript, response, audio)
+
 ### Users
 - `POST /users` - Create a new user
 - `GET /users` - List all users
@@ -98,6 +104,9 @@ uv run python scripts/setup_models.py
 # Benchmark models on your hardware
 uv run python scripts/benchmark_models.py
 
+# Profile hot path latency
+uv run python scripts/profile_hotpath.py
+
 # Start server with models
 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
@@ -110,7 +119,7 @@ SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 - [x] Phase 0: Foundation & ResourceGuard
 - [x] Phase 1: Persistence & per-user profiles
 - [x] Phase 2: Model serving through guard
-- [ ] Phase 3: Hot path (VAD → STT → LLM → TTS)
+- [x] Phase 3: Hot path (VAD → STT → LLM → TTS)
 - [ ] Phase 4: Cold path evaluation & scoring
 - [ ] Phase 5: Gap analysis, plans, reports
 - [ ] Phase 6: Dashboard
