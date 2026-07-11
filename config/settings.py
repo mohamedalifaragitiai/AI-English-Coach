@@ -59,7 +59,7 @@ class ModelSettings(BaseSettings):
         description="Faster-Whisper model name",
     )
     llm_model: str = Field(
-        default="qwen2.5:7b-instruct-q4_K_M",
+        default="qwen3:4b",
         description="Ollama LLM model name",
     )
     tts_model: str = Field(

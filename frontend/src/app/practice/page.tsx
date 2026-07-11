@@ -1,10 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Mic, MicOff, Volume2, RotateCcw, MessageSquare,
   ChevronRight, Sparkles, Zap, Clock, CheckCircle2, AlertCircle,
-  Phone, PhoneOff
+  Phone, PhoneOff, Send
 } from 'lucide-react';
 import { DashboardLayout } from '@/components/layout';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -14,14 +14,12 @@ import { cn } from '@/lib/utils';
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8001';
 
 type SessionState = 'disconnected' | 'connecting' | 'ready' | 'listening' | 'processing' | 'speaking';
-type OnboardingStep = 'level' | 'mic-test' | 'ready';
 
 interface Message {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   timestamp: Date;
-  confidence?: number;
 }
 
 interface Metrics {
@@ -32,134 +30,72 @@ interface Metrics {
 }
 
 const LEVELS = [
-  { id: 0, code: 'A1', name: 'Beginner', description: 'Basic phrases and simple sentences', color: 'bg-emerald-500' },
-  { id: 1, code: 'A2', name: 'Elementary', description: 'Everyday expressions and basic conversation', color: 'bg-green-500' },
-  { id: 2, code: 'B1', name: 'Intermediate', description: 'Clear speech on familiar topics', color: 'bg-blue-500' },
-  { id: 3, code: 'B2', name: 'Upper Intermediate', description: 'Complex topics and spontaneous interaction', color: 'bg-indigo-500' },
-  { id: 4, code: 'C1', name: 'Advanced', description: 'Fluent and flexible language use', color: 'bg-purple-500' },
-  { id: 5, code: 'C2', name: 'Proficient', description: 'Near-native level proficiency', color: 'bg-pink-500' },
-];
-
-const CONVERSATION_MODES = [
-  { id: 'free', name: 'Free Conversation', icon: MessageSquare, description: 'Open-ended practice on any topic' },
-  { id: 'roleplay', name: 'Role Play', icon: Sparkles, description: 'Practice real-world scenarios' },
+  { id: 0, code: 'A1', name: 'Beginner', color: 'bg-emerald-500' },
+  { id: 1, code: 'A2', name: 'Elementary', color: 'bg-green-500' },
+  { id: 2, code: 'B1', name: 'Intermediate', color: 'bg-blue-500' },
+  { id: 3, code: 'B2', name: 'Upper Intermediate', color: 'bg-indigo-500' },
+  { id: 4, code: 'C1', name: 'Advanced', color: 'bg-purple-500' },
+  { id: 5, code: 'C2', name: 'Proficient', color: 'bg-pink-500' },
 ];
 
 export default function PracticePage() {
-  // Onboarding state
-  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>('level');
-  const [selectedLevel, setSelectedLevel] = useState<number | null>(null);
-  const [selectedMode, setSelectedMode] = useState<string>('free');
-  const [micTested, setMicTested] = useState(false);
-
-  // Session state
+  const [selectedLevel, setSelectedLevel] = useState<number>(2);
   const [state, setState] = useState<SessionState>('disconnected');
   const [isRecording, setIsRecording] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [currentTranscript, setCurrentTranscript] = useState('');
   const [streamingResponse, setStreamingResponse] = useState('');
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [sessionStarted, setSessionStarted] = useState(false);
+  const [textInput, setTextInput] = useState('');
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const playbackContextRef = useRef<AudioContext | null>(null);
+  const audioChunksRef = useRef<Int16Array[]>([]);
 
-  // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, streamingResponse]);
 
-  // Cleanup on unmount
   useEffect(() => {
-    const cleanup = () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        animationFrameRef.current = null;
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-      if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
-        audioContextRef.current = null;
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+    return () => {
+      cleanup();
     };
-    return cleanup;
   }, []);
+
+  const cleanup = () => {
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+    if (audioContextRef.current) audioContextRef.current.close().catch(() => {});
+    if (wsRef.current) wsRef.current.close();
+  };
 
   const updateAudioLevel = useCallback(() => {
-    if (analyserRef.current) {
+    if (analyserRef.current && isRecording) {
       const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount);
       analyserRef.current.getByteFrequencyData(dataArray);
-      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-      setAudioLevel(average / 255);
+      const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+      setAudioLevel(avg / 255);
+      animationFrameRef.current = requestAnimationFrame(updateAudioLevel);
     }
-    animationFrameRef.current = requestAnimationFrame(updateAudioLevel);
-  }, []);
-
-  const testMicrophone = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      const audioContext = new AudioContext();
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-
-      analyserRef.current = analyser;
-      audioContextRef.current = audioContext;
-
-      updateAudioLevel();
-      setMicTested(true);
-      setError(null);
-    } catch (err) {
-      console.error('Microphone access failed:', err);
-      setError('Could not access microphone. Please check permissions.');
-    }
-  };
-
-  const stopMicTest = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-    analyserRef.current = null;
-    setAudioLevel(0);
-  };
+  }, [isRecording]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    if (selectedLevel === null) return;
 
     setState('connecting');
     setError(null);
 
-    const ws = new WebSocket(`${WS_URL}/ws/conversation/demo_user?mode=${selectedMode}&level=${selectedLevel}`);
+    const ws = new WebSocket(`${WS_URL}/ws/conversation/user1?mode=free&level=${selectedLevel}`);
 
     ws.onopen = () => {
-      console.log('WebSocket connected');
+      console.log('Connected');
+      setState('ready');
     };
 
     ws.onmessage = (event) => {
@@ -167,56 +103,47 @@ export default function PracticePage() {
         const data = JSON.parse(event.data);
         handleMessage(data);
       } catch (err) {
-        console.error('Failed to parse message:', err);
+        console.error('Parse error:', err);
       }
     };
 
-    ws.onerror = (err) => {
-      console.error('WebSocket error:', err);
-      setError('Connection failed. Make sure the backend is running on port 8001.');
+    ws.onerror = () => {
+      setError('Connection failed. Is backend running on port 8001?');
       setState('disconnected');
     };
 
     ws.onclose = () => {
       setState('disconnected');
       setIsRecording(false);
-      wsRef.current = null;
     };
 
     wsRef.current = ws;
-  }, [selectedLevel, selectedMode]);
+  }, [selectedLevel]);
 
   const disconnect = useCallback(() => {
-    stopRecording();
-    wsRef.current?.close();
+    cleanup();
     wsRef.current = null;
     setState('disconnected');
-    setSessionStarted(false);
     setMessages([]);
-    setMetrics(null);
   }, []);
 
   const handleMessage = (data: Record<string, unknown>) => {
+    console.log('Received:', data.type);
+
     switch (data.type) {
       case 'state':
-        setState(data.state as SessionState);
-        if (data.state === 'ready' && !sessionStarted) {
-          setSessionStarted(true);
-        }
+        const newState = data.state as SessionState;
+        setState(newState);
         break;
 
       case 'transcript':
-        setCurrentTranscript(data.text as string);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: 'user',
-            text: data.text as string,
-            timestamp: new Date(),
-            confidence: data.confidence as number,
-          },
-        ]);
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(),
+          role: 'user',
+          text: data.text as string,
+          timestamp: new Date(),
+        }]);
+        setState('processing');
         break;
 
       case 'response_chunk':
@@ -225,677 +152,394 @@ export default function PracticePage() {
 
       case 'response':
         setStreamingResponse('');
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            text: data.text as string,
-            timestamp: new Date(),
-          },
-        ]);
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: data.text as string,
+          timestamp: new Date(),
+        }]);
         break;
 
       case 'audio':
-        playAudio(data.data as string, data.sample_rate as number);
+        console.log('Audio received, playing...');
+        playAudio(data.data as string);
         break;
 
       case 'metrics':
         setMetrics(data as unknown as Metrics);
+        setState('ready');
         break;
 
       case 'error':
         setError(data.error as string);
+        setState('ready');
         break;
     }
   };
 
-  const playAudio = async (base64Audio: string, sampleRate: number) => {
+  const playAudio = async (base64Audio: string) => {
     try {
-      console.log('Playing audio, base64 length:', base64Audio.length);
-
-      // Convert base64 to blob and play via Audio element (more reliable)
-      const byteCharacters = atob(base64Audio);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      const byteChars = atob(base64Audio);
+      const byteNumbers = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) {
+        byteNumbers[i] = byteChars.charCodeAt(i);
       }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: 'audio/wav' });
-      const audioUrl = URL.createObjectURL(blob);
 
-      const audio = new Audio(audioUrl);
-      audio.onended = () => URL.revokeObjectURL(audioUrl);
-      audio.onerror = (e) => console.error('Audio playback error:', e);
+      const blob = new Blob([byteNumbers], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        setState('ready');
+      };
+
+      setState('speaking');
       await audio.play();
-
-      console.log('Audio playing');
     } catch (err) {
-      console.error('Failed to play audio:', err);
+      console.error('Audio play error:', err);
+      setState('ready');
     }
   };
 
+  // START recording - user presses button
   const startRecording = async () => {
+    if (state !== 'ready') return;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        }
+        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
       });
       streamRef.current = stream;
+      audioChunksRef.current = [];
 
       const audioContext = new AudioContext({ sampleRate: 16000 });
       const source = audioContext.createMediaStreamSource(stream);
 
-      // Create analyser for level visualization
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // Create processor for sending audio
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
       source.connect(processor);
       processor.connect(audioContext.destination);
 
       processor.onaudioprocess = (e) => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          const inputData = e.inputBuffer.getChannelData(0);
-          const int16Data = new Int16Array(inputData.length);
-          for (let i = 0; i < inputData.length; i++) {
-            int16Data[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
-          }
-          wsRef.current.send(int16Data.buffer);
+        const inputData = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
         }
+        audioChunksRef.current.push(int16);
       };
 
+      processorRef.current = processor;
       audioContextRef.current = audioContext;
-      updateAudioLevel();
+
       setIsRecording(true);
+      setState('listening');
+      updateAudioLevel();
+
     } catch (err) {
-      console.error('Failed to start recording:', err);
-      setError('Failed to access microphone. Please check permissions.');
+      console.error('Mic error:', err);
+      setError('Microphone access denied');
     }
   };
 
-  const stopRecording = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
+  // STOP recording - user releases button, send all audio
+  const stopRecording = async () => {
+    if (!isRecording) return;
+
+    // Stop audio capture
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (processorRef.current) processorRef.current.disconnect();
+    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
+      await audioContextRef.current.close().catch(() => {});
     }
-    if (animationFrameRef.current) {
-      cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-    analyserRef.current = null;
-    setAudioLevel(0);
+
     setIsRecording(false);
+    setAudioLevel(0);
+    setState('processing');
+
+    // Send all collected audio
+    if (wsRef.current?.readyState === WebSocket.OPEN && audioChunksRef.current.length > 0) {
+      const totalLength = audioChunksRef.current.reduce((sum, chunk) => sum + chunk.length, 0);
+      const combined = new Int16Array(totalLength);
+      let offset = 0;
+      for (const chunk of audioChunksRef.current) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      console.log(`Sending ${combined.length} samples (${(combined.length / 16000).toFixed(1)}s of audio)`);
+      wsRef.current.send(combined.buffer);
+    }
+
+    audioChunksRef.current = [];
   };
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
+  // Send text message directly
+  const sendTextMessage = () => {
+    if (!textInput.trim() || !wsRef.current || state !== 'ready') return;
+
+    wsRef.current.send(JSON.stringify({ type: 'text', text: textInput.trim() }));
+    setMessages(prev => [...prev, {
+      id: crypto.randomUUID(),
+      role: 'user',
+      text: textInput.trim(),
+      timestamp: new Date(),
+    }]);
+    setTextInput('');
+    setState('processing');
   };
 
   const resetConversation = () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'reset' }));
       setMessages([]);
-      setCurrentTranscript('');
       setStreamingResponse('');
       setMetrics(null);
+      setState('ready');
     }
   };
 
-  const getStateInfo = () => {
-    switch (state) {
-      case 'ready':
-        return { color: 'bg-emerald-500', text: 'Ready', pulse: false };
-      case 'listening':
-        return { color: 'bg-blue-500', text: 'Listening', pulse: true };
-      case 'processing':
-        return { color: 'bg-amber-500', text: 'Thinking', pulse: true };
-      case 'speaking':
-        return { color: 'bg-purple-500', text: 'Speaking', pulse: true };
-      case 'connecting':
-        return { color: 'bg-slate-400', text: 'Connecting', pulse: true };
-      default:
-        return { color: 'bg-slate-300', text: 'Disconnected', pulse: false };
+  // Button colors based on state
+  const getMicButtonStyle = () => {
+    if (isRecording) {
+      return 'bg-green-500 hover:bg-green-600 text-white animate-pulse';
     }
+    if (state === 'processing' || state === 'speaking') {
+      return 'bg-red-500 text-white cursor-not-allowed';
+    }
+    return 'bg-blue-600 hover:bg-blue-700 text-white';
   };
 
-  const stateInfo = getStateInfo();
-
-  // Render onboarding steps
-  if (!sessionStarted) {
+  // Not connected - show level selection
+  if (state === 'disconnected' || state === 'connecting') {
     return (
       <DashboardLayout userName="Learner" streakDays={0} level="--">
-        <div className="mx-auto max-w-3xl">
-          {/* Progress indicator */}
-          <div className="mb-8">
-            <div className="flex items-center justify-center gap-2 mb-4">
-              {['level', 'mic-test', 'ready'].map((step, idx) => (
-                <div key={step} className="flex items-center">
-                  <div className={cn(
-                    'w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all',
-                    onboardingStep === step
-                      ? 'bg-blue-600 text-white scale-110'
-                      : idx < ['level', 'mic-test', 'ready'].indexOf(onboardingStep)
-                        ? 'bg-emerald-500 text-white'
-                        : 'bg-slate-200 text-slate-500'
-                  )}>
-                    {idx < ['level', 'mic-test', 'ready'].indexOf(onboardingStep) ? (
-                      <CheckCircle2 className="w-5 h-5" />
-                    ) : (
-                      idx + 1
+        <div className="mx-auto max-w-2xl">
+          <Card className="shadow-xl">
+            <CardHeader className="text-center">
+              <CardTitle className="text-2xl">Select Your Level</CardTitle>
+              <CardDescription>Choose your English proficiency level</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-3 gap-3 mb-6">
+                {LEVELS.map((level) => (
+                  <button
+                    key={level.id}
+                    onClick={() => setSelectedLevel(level.id)}
+                    className={cn(
+                      'p-4 rounded-xl border-2 transition-all',
+                      selectedLevel === level.id
+                        ? 'border-blue-500 bg-blue-50 scale-105'
+                        : 'border-slate-200 hover:border-slate-300'
                     )}
-                  </div>
-                  {idx < 2 && (
-                    <div className={cn(
-                      'w-12 h-1 mx-2 rounded',
-                      idx < ['level', 'mic-test', 'ready'].indexOf(onboardingStep)
-                        ? 'bg-emerald-500'
-                        : 'bg-slate-200'
-                    )} />
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Step 1: Select Level */}
-          {onboardingStep === 'level' && (
-            <Card className="border-0 shadow-xl">
-              <CardHeader className="text-center pb-2">
-                <CardTitle className="text-2xl">What's your English level?</CardTitle>
-                <CardDescription className="text-base">
-                  We'll adjust the conversation difficulty to match your abilities
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="pt-6">
-                <div className="grid grid-cols-2 gap-3">
-                  {LEVELS.map((level) => (
-                    <button
-                      key={level.id}
-                      onClick={() => setSelectedLevel(level.id)}
-                      className={cn(
-                        'p-4 rounded-xl border-2 text-left transition-all hover:scale-[1.02]',
-                        selectedLevel === level.id
-                          ? 'border-blue-500 bg-blue-50 shadow-md'
-                          : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-                      )}
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center text-white font-bold', level.color)}>
-                          {level.code}
-                        </div>
-                        <div>
-                          <div className="font-semibold text-slate-900">{level.name}</div>
-                          <div className="text-sm text-slate-500">{level.description}</div>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mt-6 pt-6 border-t">
-                  <p className="text-sm text-slate-500 mb-3">Conversation mode</p>
-                  <div className="flex gap-3">
-                    {CONVERSATION_MODES.map((mode) => (
-                      <button
-                        key={mode.id}
-                        onClick={() => setSelectedMode(mode.id)}
-                        className={cn(
-                          'flex-1 p-3 rounded-xl border-2 text-left transition-all',
-                          selectedMode === mode.id
-                            ? 'border-blue-500 bg-blue-50'
-                            : 'border-slate-200 hover:border-slate-300'
-                        )}
-                      >
-                        <mode.icon className={cn(
-                          'w-5 h-5 mb-2',
-                          selectedMode === mode.id ? 'text-blue-600' : 'text-slate-400'
-                        )} />
-                        <div className="font-medium text-sm">{mode.name}</div>
-                        <div className="text-xs text-slate-500">{mode.description}</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <Button
-                  onClick={() => setOnboardingStep('mic-test')}
-                  disabled={selectedLevel === null}
-                  className="w-full mt-6 h-12 text-base"
-                  size="lg"
-                >
-                  Continue
-                  <ChevronRight className="w-5 h-5 ml-2" />
-                </Button>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Step 2: Microphone Test */}
-          {onboardingStep === 'mic-test' && (
-            <Card className="border-0 shadow-xl">
-              <CardHeader className="text-center pb-2">
-                <CardTitle className="text-2xl">Test Your Microphone</CardTitle>
-                <CardDescription className="text-base">
-                  Make sure we can hear you clearly before starting
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="pt-6">
-                <div className="flex flex-col items-center">
-                  {/* Microphone visualization */}
-                  <div className="relative mb-8">
-                    <div className={cn(
-                      'w-32 h-32 rounded-full flex items-center justify-center transition-all',
-                      micTested
-                        ? audioLevel > 0.1
-                          ? 'bg-emerald-100'
-                          : 'bg-amber-100'
-                        : 'bg-slate-100'
-                    )}>
-                      {/* Pulse rings */}
-                      {micTested && audioLevel > 0.05 && (
-                        <>
-                          <div
-                            className="absolute inset-0 rounded-full bg-emerald-400 opacity-20 animate-ping"
-                            style={{ animationDuration: `${1.5 - audioLevel}s` }}
-                          />
-                          <div
-                            className="absolute rounded-full bg-emerald-400 opacity-10"
-                            style={{
-                              width: `${130 + audioLevel * 50}%`,
-                              height: `${130 + audioLevel * 50}%`,
-                              transition: 'all 0.1s'
-                            }}
-                          />
-                        </>
-                      )}
-                      <Mic className={cn(
-                        'w-12 h-12 transition-colors',
-                        micTested
-                          ? audioLevel > 0.1
-                            ? 'text-emerald-600'
-                            : 'text-amber-600'
-                          : 'text-slate-400'
-                      )} />
-                    </div>
-                  </div>
-
-                  {/* Audio level bars */}
-                  <div className="flex items-end gap-1 h-16 mb-6">
-                    {Array.from({ length: 20 }).map((_, i) => (
-                      <div
-                        key={i}
-                        className={cn(
-                          'w-2 rounded-full transition-all duration-75',
-                          i / 20 < audioLevel ? 'bg-emerald-500' : 'bg-slate-200'
-                        )}
-                        style={{
-                          height: `${Math.max(8, Math.sin(i * 0.5) * 20 + (i / 20 < audioLevel ? audioLevel * 60 : 0))}px`
-                        }}
-                      />
-                    ))}
-                  </div>
-
-                  {/* Status message */}
-                  <div className="text-center mb-6">
-                    {!micTested ? (
-                      <p className="text-slate-500">Click the button below to test your microphone</p>
-                    ) : audioLevel > 0.1 ? (
-                      <div className="flex items-center gap-2 text-emerald-600">
-                        <CheckCircle2 className="w-5 h-5" />
-                        <span className="font-medium">Great! We can hear you clearly</span>
-                      </div>
-                    ) : audioLevel > 0.02 ? (
-                      <div className="flex items-center gap-2 text-amber-600">
-                        <AlertCircle className="w-5 h-5" />
-                        <span className="font-medium">Speak a bit louder</span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-2 text-amber-600">
-                        <AlertCircle className="w-5 h-5" />
-                        <span className="font-medium">Say something to test...</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {error && (
-                    <div className="mb-4 p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4" />
-                      {error}
-                    </div>
-                  )}
-
-                  <div className="flex gap-3 w-full">
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        stopMicTest();
-                        setOnboardingStep('level');
-                      }}
-                      className="flex-1 h-12"
-                    >
-                      Back
-                    </Button>
-                    {!micTested ? (
-                      <Button onClick={testMicrophone} className="flex-1 h-12">
-                        <Mic className="w-5 h-5 mr-2" />
-                        Test Microphone
-                      </Button>
-                    ) : (
-                      <Button
-                        onClick={() => {
-                          stopMicTest();
-                          setOnboardingStep('ready');
-                        }}
-                        className="flex-1 h-12"
-                      >
-                        Continue
-                        <ChevronRight className="w-5 h-5 ml-2" />
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Step 3: Ready to start */}
-          {onboardingStep === 'ready' && (
-            <Card className="border-0 shadow-xl">
-              <CardHeader className="text-center pb-2">
-                <CardTitle className="text-2xl">You're All Set!</CardTitle>
-                <CardDescription className="text-base">
-                  Ready to practice your English with AI coach
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="pt-6">
-                <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl p-6 mb-6">
-                  <div className="flex items-center gap-4 mb-4">
-                    <div className={cn(
-                      'w-14 h-14 rounded-xl flex items-center justify-center text-white font-bold text-lg',
-                      LEVELS[selectedLevel || 0].color
-                    )}>
-                      {LEVELS[selectedLevel || 0].code}
-                    </div>
-                    <div>
-                      <div className="font-semibold text-lg">{LEVELS[selectedLevel || 0].name}</div>
-                      <div className="text-slate-500">{CONVERSATION_MODES.find(m => m.id === selectedMode)?.name}</div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 text-sm text-slate-600">
-                    <div className="flex items-center gap-2">
-                      <Zap className="w-4 h-4 text-amber-500" />
-                      <span>Real-time speech recognition</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <MessageSquare className="w-4 h-4 text-blue-500" />
-                      <span>Natural conversation with AI</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Volume2 className="w-4 h-4 text-purple-500" />
-                      <span>Voice responses from coach</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <Button
-                    variant="outline"
-                    onClick={() => setOnboardingStep('mic-test')}
-                    className="flex-1 h-12"
                   >
-                    Back
-                  </Button>
-                  <Button
-                    onClick={connect}
-                    disabled={state === 'connecting'}
-                    className="flex-1 h-12 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
-                    size="lg"
-                  >
-                    {state === 'connecting' ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
-                        Connecting...
-                      </>
-                    ) : (
-                      <>
-                        <Phone className="w-5 h-5 mr-2" />
-                        Start Session
-                      </>
-                    )}
-                  </Button>
-                </div>
+                    <div className={cn('w-12 h-12 mx-auto rounded-lg flex items-center justify-center text-white font-bold mb-2', level.color)}>
+                      {level.code}
+                    </div>
+                    <div className="text-sm font-medium">{level.name}</div>
+                  </button>
+                ))}
+              </div>
 
-                {error && (
-                  <div className="mt-4 p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4" />
-                    {error}
-                  </div>
+              <Button
+                onClick={connect}
+                disabled={state === 'connecting'}
+                className="w-full h-14 text-lg bg-gradient-to-r from-blue-600 to-indigo-600"
+                size="lg"
+              >
+                {state === 'connecting' ? (
+                  <><div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />Connecting...</>
+                ) : (
+                  <><Phone className="w-6 h-6 mr-2" />Start Practice</>
                 )}
-              </CardContent>
-            </Card>
-          )}
+              </Button>
+
+              {error && (
+                <div className="mt-4 p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />{error}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
       </DashboardLayout>
     );
   }
 
-  // Main conversation UI
+  // Connected - show conversation
   return (
-    <DashboardLayout userName="Learner" streakDays={0} level={LEVELS[selectedLevel || 0].code}>
-      <div className="mx-auto max-w-4xl h-[calc(100vh-8rem)] flex flex-col">
-        {/* Header bar */}
-        <div className="flex items-center justify-between mb-4">
+    <DashboardLayout userName="Learner" streakDays={0} level={LEVELS[selectedLevel].code}>
+      <div className="mx-auto max-w-3xl h-[calc(100vh-8rem)] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
-            <div className={cn(
-              'w-10 h-10 rounded-lg flex items-center justify-center text-white font-bold text-sm',
-              LEVELS[selectedLevel || 0].color
-            )}>
-              {LEVELS[selectedLevel || 0].code}
+            <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center text-white font-bold', LEVELS[selectedLevel].color)}>
+              {LEVELS[selectedLevel].code}
             </div>
             <div>
-              <h1 className="font-semibold text-lg">Practice Session</h1>
-              <p className="text-sm text-slate-500">{CONVERSATION_MODES.find(m => m.id === selectedMode)?.name}</p>
+              <h1 className="font-semibold">Practice Session</h1>
+              <div className="flex items-center gap-2 text-sm">
+                <span className={cn(
+                  'w-2 h-2 rounded-full',
+                  state === 'ready' ? 'bg-green-500' :
+                  state === 'listening' ? 'bg-green-500 animate-pulse' :
+                  state === 'processing' ? 'bg-yellow-500 animate-pulse' :
+                  state === 'speaking' ? 'bg-purple-500 animate-pulse' : 'bg-slate-400'
+                )} />
+                <span className="text-slate-500 capitalize">{state}</span>
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100">
-              <div className={cn(
-                'w-2 h-2 rounded-full',
-                stateInfo.color,
-                stateInfo.pulse && 'animate-pulse'
-              )} />
-              <span className="text-sm font-medium text-slate-600">{stateInfo.text}</span>
-            </div>
+          <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={resetConversation}>
-              <RotateCcw className="w-4 h-4 mr-1" />
-              Reset
+              <RotateCcw className="w-4 h-4 mr-1" />Reset
             </Button>
-            <Button variant="outline" size="sm" onClick={disconnect} className="text-red-600 hover:text-red-700">
-              <PhoneOff className="w-4 h-4 mr-1" />
-              End
+            <Button variant="outline" size="sm" onClick={disconnect} className="text-red-600">
+              <PhoneOff className="w-4 h-4 mr-1" />End
             </Button>
           </div>
         </div>
 
         {/* Messages */}
-        <Card className="flex-1 flex flex-col overflow-hidden border-slate-200">
-          <div className="flex-1 overflow-y-auto p-4">
-            <div className="space-y-4" suppressHydrationWarning>
-              {messages.length === 0 && !streamingResponse ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center mb-4">
-                    <Mic className="w-8 h-8 text-blue-600" />
+        <Card className="flex-1 overflow-hidden mb-3">
+          <div className="h-full overflow-y-auto p-4">
+            {messages.length === 0 && !streamingResponse ? (
+              <div className="flex flex-col items-center justify-center h-full text-center">
+                <Mic className="w-16 h-16 text-slate-300 mb-4" />
+                <h3 className="font-semibold text-lg mb-2">Ready to Practice!</h3>
+                <p className="text-slate-500 max-w-sm">
+                  Hold the <span className="text-green-600 font-medium">green microphone button</span> while speaking,
+                  then release to send your message.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {messages.map((msg) => (
+                  <div key={msg.id} className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}>
+                    <div className={cn(
+                      'rounded-2xl px-4 py-3 max-w-[80%]',
+                      msg.role === 'user'
+                        ? 'bg-blue-600 text-white rounded-br-sm'
+                        : 'bg-slate-100 text-slate-800 rounded-bl-sm'
+                    )}>
+                      <p>{msg.text}</p>
+                    </div>
                   </div>
-                  <h3 className="font-semibold text-lg text-slate-700 mb-2">Ready to practice!</h3>
-                  <p className="text-slate-500 max-w-sm">
-                    Click the microphone button and start speaking. I'll listen and respond to help you practice your English.
-                  </p>
-                </div>
-              ) : (
-                <>
-                  {messages.map((msg) => (
-                    <div
-                      key={msg.id}
-                      className={cn('flex', msg.role === 'user' ? 'justify-end' : 'justify-start')}
-                    >
-                      <div
-                        className={cn(
-                          'rounded-2xl px-4 py-3 max-w-[80%] shadow-sm',
-                          msg.role === 'user'
-                            ? 'bg-blue-600 text-white rounded-br-md'
-                            : 'bg-white border border-slate-200 text-slate-800 rounded-bl-md'
-                        )}
-                      >
-                        <p className="text-[15px] leading-relaxed">{msg.text}</p>
-                        <div
-                          className={cn(
-                            'flex items-center gap-2 mt-1 text-xs',
-                            msg.role === 'user' ? 'text-blue-200' : 'text-slate-400'
-                          )}
-                          suppressHydrationWarning
-                        >
-                          <Clock className="w-3 h-3" />
-                          <span suppressHydrationWarning>
-                            {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </span>
-                          {msg.confidence !== undefined && msg.confidence > 0 && (
-                            <span className="ml-2">{Math.round(msg.confidence * 100)}% confidence</span>
-                          )}
-                        </div>
-                      </div>
+                ))}
+                {streamingResponse && (
+                  <div className="flex justify-start">
+                    <div className="rounded-2xl rounded-bl-sm px-4 py-3 max-w-[80%] bg-slate-100">
+                      <p>{streamingResponse}</p>
+                      <span className="inline-flex gap-1 mt-1">
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" />
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{animationDelay:'0.1s'}} />
+                        <span className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce" style={{animationDelay:'0.2s'}} />
+                      </span>
                     </div>
-                  ))}
-                  {streamingResponse && (
-                    <div className="flex justify-start">
-                      <div className="rounded-2xl rounded-bl-md px-4 py-3 max-w-[80%] bg-white border border-slate-200 shadow-sm">
-                        <p className="text-[15px] leading-relaxed text-slate-800">{streamingResponse}</p>
-                        <div className="flex items-center gap-1 mt-2">
-                          <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-bounce" />
-                          <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '0.1s' }} />
-                          <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-bounce" style={{ animationDelay: '0.2s' }} />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
           </div>
         </Card>
 
         {/* Controls */}
-        <div className="mt-4 p-4 bg-white rounded-2xl border border-slate-200 shadow-sm">
-          <div className="flex items-center justify-center gap-6">
-            {/* Audio level indicator */}
-            <div className="flex items-center gap-1 w-24">
-              {isRecording && (
-                <>
-                  {Array.from({ length: 8 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className={cn(
-                        'w-1.5 rounded-full transition-all duration-75',
-                        i / 8 < audioLevel ? 'bg-emerald-500' : 'bg-slate-200'
-                      )}
-                      style={{
-                        height: `${12 + (i / 8 < audioLevel ? audioLevel * 24 : 0)}px`
-                      }}
-                    />
-                  ))}
-                </>
-              )}
+        <div className="bg-white rounded-2xl border p-4 shadow-sm">
+          {/* Audio level bars */}
+          {isRecording && (
+            <div className="flex items-center justify-center gap-1 h-8 mb-3">
+              {Array.from({ length: 20 }).map((_, i) => (
+                <div
+                  key={i}
+                  className={cn(
+                    'w-1.5 rounded-full transition-all duration-75',
+                    i / 20 < audioLevel ? 'bg-green-500' : 'bg-slate-200'
+                  )}
+                  style={{ height: `${8 + (i / 20 < audioLevel ? audioLevel * 24 : 0)}px` }}
+                />
+              ))}
             </div>
+          )}
 
-            {/* Main mic button */}
+          {/* Main controls */}
+          <div className="flex items-center justify-center gap-4">
+            {/* Big microphone button - PUSH TO TALK */}
             <button
-              onClick={toggleRecording}
+              onMouseDown={startRecording}
+              onMouseUp={stopRecording}
+              onMouseLeave={isRecording ? stopRecording : undefined}
+              onTouchStart={startRecording}
+              onTouchEnd={stopRecording}
               disabled={state === 'processing' || state === 'speaking'}
               className={cn(
-                'relative w-20 h-20 rounded-full flex items-center justify-center transition-all',
-                'focus:outline-none focus:ring-4 focus:ring-blue-200',
-                isRecording
-                  ? 'bg-red-500 hover:bg-red-600 text-white'
-                  : state === 'processing' || state === 'speaking'
-                    ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                    : 'bg-blue-600 hover:bg-blue-700 text-white hover:scale-105'
+                'w-20 h-20 rounded-full flex items-center justify-center transition-all shadow-lg',
+                'focus:outline-none focus:ring-4 focus:ring-offset-2',
+                getMicButtonStyle(),
+                isRecording && 'scale-110 ring-4 ring-green-300'
               )}
             >
-              {/* Pulse animation when recording */}
-              {isRecording && (
-                <div className="absolute inset-0 rounded-full bg-red-400 animate-ping opacity-30" />
-              )}
-              {isRecording ? (
-                <MicOff className="w-8 h-8 relative z-10" />
+              {state === 'processing' ? (
+                <div className="w-8 h-8 border-4 border-white border-t-transparent rounded-full animate-spin" />
+              ) : state === 'speaking' ? (
+                <Volume2 className="w-8 h-8 animate-pulse" />
               ) : (
-                <Mic className="w-8 h-8 relative z-10" />
+                <Mic className="w-8 h-8" />
               )}
             </button>
-
-            {/* Right side spacer for symmetry */}
-            <div className="w-24" />
           </div>
 
           {/* Status text */}
-          <p className="text-center text-sm text-slate-500 mt-3">
+          <p className="text-center text-sm mt-3 font-medium">
             {isRecording ? (
-              <span className="flex items-center justify-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                Listening... Speak clearly
-              </span>
+              <span className="text-green-600">Recording... Release to send</span>
             ) : state === 'processing' ? (
-              <span className="flex items-center justify-center gap-2">
-                <div className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
-                Processing your speech...
-              </span>
+              <span className="text-yellow-600">Processing your message...</span>
             ) : state === 'speaking' ? (
-              <span className="flex items-center justify-center gap-2">
-                <Volume2 className="w-4 h-4 text-purple-500" />
-                Coach is speaking...
-              </span>
+              <span className="text-purple-600">Coach is speaking...</span>
             ) : (
-              'Tap the microphone to speak'
+              <span className="text-slate-500">Hold to speak</span>
             )}
           </p>
+
+          {/* Text input fallback */}
+          <div className="flex gap-2 mt-4 pt-4 border-t">
+            <input
+              type="text"
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && sendTextMessage()}
+              placeholder="Or type your message..."
+              disabled={state !== 'ready'}
+              className="flex-1 px-4 py-2 rounded-lg border focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-slate-100"
+            />
+            <Button onClick={sendTextMessage} disabled={state !== 'ready' || !textInput.trim()}>
+              <Send className="w-4 h-4" />
+            </Button>
+          </div>
         </div>
 
         {/* Metrics */}
         {metrics && (
-          <div className="mt-3 flex justify-center gap-4 text-xs text-slate-500">
+          <div className="mt-2 flex justify-center gap-4 text-xs text-slate-500">
             <span>STT: {metrics.stt_time.toFixed(2)}s</span>
             <span>LLM: {metrics.llm_time.toFixed(2)}s</span>
             <span>TTS: {metrics.tts_time.toFixed(2)}s</span>
-            <span className={cn(
-              'font-medium',
-              metrics.total_time < 2 ? 'text-emerald-600' : 'text-amber-600'
-            )}>
+            <span className={metrics.total_time < 3 ? 'text-green-600' : 'text-amber-600'}>
               Total: {metrics.total_time.toFixed(2)}s
             </span>
           </div>
         )}
 
-        {/* Error display */}
         {error && (
-          <div className="mt-3 p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 flex-shrink-0" />
-            {error}
+          <div className="mt-2 p-3 rounded-lg bg-red-50 text-red-600 text-sm flex items-center gap-2">
+            <AlertCircle className="w-4 h-4" />{error}
           </div>
         )}
       </div>

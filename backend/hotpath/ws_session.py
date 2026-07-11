@@ -221,14 +221,19 @@ class ConversationSession:
         # Convert bytes to numpy array
         audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # Process through VAD in 512-sample chunks (required by Silero VAD)
-        results = self.vad.process_chunk(audio)
+        # If audio is longer than 0.5 seconds, treat as push-to-talk (process immediately)
+        # This bypasses VAD for better UX with push-to-talk UI
+        if len(audio) > self.config.sample_rate * 0.5:  # > 0.5 seconds
+            logger.info("push_to_talk_audio", samples=len(audio), duration_s=len(audio)/self.config.sample_rate)
+            await self._process_turn(audio)
+            return
 
+        # For smaller chunks, use VAD (streaming mode)
+        results = self.vad.process_chunk(audio)
         for result in results:
             if result.state == VADState.SPEAKING:
                 self.state = SessionState.LISTENING
 
-            # Speech ended - process the turn
             if result.speech_end_time and result.audio_buffer is not None:
                 await self._process_turn(result.audio_buffer)
                 break
