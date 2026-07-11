@@ -4,6 +4,7 @@ Single Uvicorn worker only - multiple workers would duplicate model loads
 and blow VRAM on an 8GB GPU. Concurrency via asyncio.
 """
 
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -14,8 +15,9 @@ from backend.api.users import router as users_router
 from backend.core.event_bus import EventBus
 from backend.core.logging import get_logger, setup_logging
 from backend.core.metrics import get_metrics, get_metrics_content_type
+from backend.core.model_manager import ModelManager
 from backend.core.resource_guard import ResourceGuard
-from backend.persistence import Database, close_database, init_database
+from backend.persistence import close_database, init_database
 from config.settings import get_settings
 
 logger = get_logger(__name__)
@@ -23,12 +25,13 @@ logger = get_logger(__name__)
 # Global instances (set during lifespan)
 resource_guard: ResourceGuard | None = None
 event_bus: EventBus | None = None
+model_manager: ModelManager | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan - startup and shutdown."""
-    global resource_guard, event_bus
+    global resource_guard, event_bus, model_manager
 
     settings = get_settings()
     setup_logging(settings.log_level, json_output=settings.log_level != "DEBUG")
@@ -63,16 +66,43 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.event_bus = event_bus
     app.state.settings = settings
 
+    # Optionally load AI models (skip with SKIP_MODELS=1 for development)
+    skip_models = os.environ.get("SKIP_MODELS", "0") == "1"
+
+    if not skip_models:
+        try:
+            model_manager = ModelManager(
+                guard=resource_guard,
+                stt_model=settings.model.stt_model,
+                llm_model=settings.model.llm_model,
+                tts_model=settings.model.tts_model,
+                ollama_host=settings.model.ollama_host,
+            )
+            await model_manager.initialize()
+            app.state.model_manager = model_manager
+            logger.info("models_loaded", models=model_manager.models_status)
+        except Exception as e:
+            logger.warning("models_not_loaded", error=str(e))
+            app.state.model_manager = None
+    else:
+        logger.info("models_skipped", reason="SKIP_MODELS=1")
+        app.state.model_manager = None
+
     logger.info(
         "startup_complete",
         gpu_available=resource_guard.has_gpu,
         database_path=str(settings.database.path),
+        models_loaded=model_manager is not None and model_manager.is_initialized,
     )
 
     yield
 
     # Shutdown
     logger.info("shutdown_begin")
+
+    if model_manager:
+        await model_manager.shutdown()
+
     await event_bus.stop()
     await resource_guard.stop()
     await close_database()
@@ -116,6 +146,7 @@ def create_app() -> FastAPI:
         """Detailed health check."""
         guard = app.state.resource_guard
         snapshot = guard.snapshot() if guard else None
+        mm = getattr(app.state, "model_manager", None)
 
         return {
             "status": "healthy",
@@ -128,6 +159,7 @@ def create_app() -> FastAPI:
                 "running": app.state.event_bus.is_running if app.state.event_bus else False,
                 "queue_size": app.state.event_bus.queue_size if app.state.event_bus else 0,
             },
+            "models": mm.models_status if mm and mm.is_initialized else None,
             "resources": snapshot.to_dict() if snapshot else None,
         }
 

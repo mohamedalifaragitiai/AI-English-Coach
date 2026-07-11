@@ -89,11 +89,27 @@ english-coach/
 - `GET /users/{user_id}/skills/{skill}/trend` - Get skill trend over time
 - `POST /users/{user_id}/streak/update` - Update streak
 
+## Model Setup
+
+```bash
+# Download models (one-time)
+uv run python scripts/setup_models.py
+
+# Benchmark models on your hardware
+uv run python scripts/benchmark_models.py
+
+# Start server with models
+uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+# Start server without models (development)
+SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
 ## Development Phases
 
 - [x] Phase 0: Foundation & ResourceGuard
 - [x] Phase 1: Persistence & per-user profiles
-- [ ] Phase 2: Model serving through guard
+- [x] Phase 2: Model serving through guard
 - [ ] Phase 3: Hot path (VAD → STT → LLM → TTS)
 - [ ] Phase 4: Cold path evaluation & scoring
 - [ ] Phase 5: Gap analysis, plans, reports
