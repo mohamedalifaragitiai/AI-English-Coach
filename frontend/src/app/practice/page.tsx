@@ -252,22 +252,24 @@ export default function PracticePage() {
 
   const playAudio = async (base64Audio: string, sampleRate: number) => {
     try {
-      const audioData = atob(base64Audio);
-      const arrayBuffer = new ArrayBuffer(audioData.length);
-      const view = new Uint8Array(arrayBuffer);
-      for (let i = 0; i < audioData.length; i++) {
-        view[i] = audioData.charCodeAt(i);
-      }
+      console.log('Playing audio, base64 length:', base64Audio.length);
 
-      if (!playbackContextRef.current) {
-        playbackContextRef.current = new AudioContext();
+      // Convert base64 to blob and play via Audio element (more reliable)
+      const byteCharacters = atob(base64Audio);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
       }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: 'audio/wav' });
+      const audioUrl = URL.createObjectURL(blob);
 
-      const audioBuffer = await playbackContextRef.current.decodeAudioData(arrayBuffer);
-      const source = playbackContextRef.current.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(playbackContextRef.current.destination);
-      source.start();
+      const audio = new Audio(audioUrl);
+      audio.onended = () => URL.revokeObjectURL(audioUrl);
+      audio.onerror = (e) => console.error('Audio playback error:', e);
+      await audio.play();
+
+      console.log('Audio playing');
     } catch (err) {
       console.error('Failed to play audio:', err);
     }
