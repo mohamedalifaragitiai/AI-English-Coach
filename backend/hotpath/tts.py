@@ -6,13 +6,10 @@ Runs on CPU to leave VRAM for STT and LLM.
 
 import io
 import json
-import subprocess
-import tempfile
 import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
 
 from backend.core.logging import get_logger
 from backend.core.metrics import hotpath_stage_duration_seconds
@@ -63,13 +60,13 @@ class TTSService:
         self.model_path: Path | None = None
         self.config_path: Path | None = None
         self.sample_rate = 22050  # Default Piper sample rate
+        self._voice = None
 
         if tts_config:
             self.model_path = Path(tts_config["model_path"])
             self.config_path = Path(tts_config["config_path"])
 
             if self.model_path.exists() and self.config_path.exists():
-                self.available = True
                 # Read sample rate from config
                 try:
                     with open(self.config_path) as f:
@@ -78,11 +75,21 @@ class TTSService:
                 except Exception:
                     pass
 
-                logger.info(
-                    "tts_initialized",
-                    model=str(self.model_path),
-                    sample_rate=self.sample_rate,
-                )
+                # Load Piper voice
+                try:
+                    from piper import PiperVoice
+
+                    self._voice = PiperVoice.load(str(self.model_path), str(self.config_path))
+                    self.available = True
+                    logger.info(
+                        "tts_initialized",
+                        model=str(self.model_path),
+                        sample_rate=self.sample_rate,
+                    )
+                except ImportError:
+                    logger.error("piper_not_installed", message="Run: uv add piper-tts")
+                except Exception as e:
+                    logger.error("tts_load_error", error=str(e))
             else:
                 logger.warning("tts_model_not_found", path=str(self.model_path))
         else:
@@ -97,8 +104,12 @@ class TTSService:
         Returns:
             TTSResult with audio bytes, or None if TTS unavailable
         """
-        if not self.available:
+        if not self.available or self._voice is None:
             logger.warning("tts_unavailable")
+            return None
+
+        if not text or not text.strip():
+            logger.warning("tts_empty_text")
             return None
 
         start_time = time.perf_counter()
@@ -115,64 +126,30 @@ class TTSService:
             return None
 
         try:
-            # Use piper CLI for synthesis
-            # piper --model model.onnx --output_file - < text
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-                f.write(text)
-                text_file = f.name
+            # Synthesize to WAV bytes in memory
+            wav_buffer = io.BytesIO()
 
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                output_file = f.name
+            with wave.open(wav_buffer, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(self.sample_rate)
 
-            # Run piper
-            result = subprocess.run(
-                [
-                    "piper",
-                    "--model", str(self.model_path),
-                    "--config", str(self.config_path),
-                    "--output_file", output_file,
-                ],
-                input=text,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+                # Synthesize and write audio
+                for audio_bytes in self._voice.synthesize_stream_raw(text):
+                    wav_file.writeframes(audio_bytes)
 
-            if result.returncode != 0:
-                # Fallback: try with echo pipe
-                result = subprocess.run(
-                    f'echo "{text}" | piper --model {self.model_path} --config {self.config_path} --output_file {output_file}',
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+            audio_bytes = wav_buffer.getvalue()
+            wav_buffer.seek(0)
 
-            if result.returncode != 0:
-                logger.error("tts_piper_error", stderr=result.stderr)
-                return None
-
-            # Read the output file
-            output_path = Path(output_file)
-            if not output_path.exists():
-                logger.error("tts_output_missing")
-                return None
-
-            audio_bytes = output_path.read_bytes()
-
-            # Calculate duration from WAV header
+            # Calculate duration
             duration = 0.0
             try:
-                with wave.open(output_file, "rb") as wf:
+                with wave.open(wav_buffer, "rb") as wf:
                     frames = wf.getnframes()
                     rate = wf.getframerate()
                     duration = frames / rate
             except Exception:
                 pass
-
-            # Cleanup temp files
-            Path(text_file).unlink(missing_ok=True)
-            output_path.unlink(missing_ok=True)
 
             processing_time = time.perf_counter() - start_time
             hotpath_stage_duration_seconds.labels(stage="tts").observe(processing_time)
@@ -180,8 +157,9 @@ class TTSService:
             logger.info(
                 "tts_complete",
                 text_len=len(text),
-                duration=duration,
-                processing_time=processing_time,
+                audio_size=len(audio_bytes),
+                duration=round(duration, 2),
+                processing_time=round(processing_time, 3),
             )
 
             return TTSResult(
@@ -191,13 +169,6 @@ class TTSService:
                 processing_time_seconds=processing_time,
             )
 
-        except subprocess.TimeoutExpired:
-            logger.error("tts_timeout")
-            return None
-        except FileNotFoundError:
-            logger.error("tts_piper_not_found", message="Install piper: pip install piper-tts")
-            self.available = False
-            return None
         except Exception as e:
             logger.error("tts_error", error=str(e))
             return None
