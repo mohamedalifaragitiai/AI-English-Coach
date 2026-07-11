@@ -46,8 +46,12 @@ MODEL_VRAM_ESTIMATES = {
     "base": 0.2e9,  # ~0.2 GB
     "tiny": 0.1e9,  # ~0.1 GB
     # Ollama LLM models (approximate)
+    "qwen3:4b": 2.5e9,  # ~2.5 GB (Q4_K_M quantized)
+    "qwen3:8b": 5.0e9,  # ~5.0 GB
+    "qwen3:1.7b": 1.2e9,  # ~1.2 GB
     "qwen2.5:7b-instruct-q4_K_M": 5.5e9,  # ~5.5 GB
     "qwen2.5:7b": 5.5e9,
+    "qwen2.5:1.5b": 1.0e9,  # ~1.0 GB
     "llama3.1:8b-instruct-q4_K_M": 5.5e9,
     "llama3.1:8b": 5.5e9,
     "mistral:7b-instruct-q4_K_M": 5.0e9,
