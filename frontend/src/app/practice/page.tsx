@@ -1,16 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
-  Mic, MicOff, Volume2, Square, RotateCcw, MessageSquare,
+  Mic, MicOff, Volume2, RotateCcw, MessageSquare,
   ChevronRight, Sparkles, Zap, Clock, CheckCircle2, AlertCircle,
-  Waves, Settings2, Phone, PhoneOff
+  Phone, PhoneOff
 } from 'lucide-react';
 import { DashboardLayout } from '@/components/layout';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8001';
@@ -80,13 +78,25 @@ export default function PracticePage() {
 
   // Cleanup on unmount
   useEffect(() => {
-    return () => {
-      stopRecording();
-      wsRef.current?.close();
+    const cleanup = () => {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      if (audioContextRef.current) {
+        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
       }
     };
+    return cleanup;
   }, []);
 
   const updateAudioLevel = useCallback(() => {
@@ -724,8 +734,8 @@ export default function PracticePage() {
 
         {/* Messages */}
         <Card className="flex-1 flex flex-col overflow-hidden border-slate-200">
-          <ScrollArea className="flex-1 p-4">
-            <div className="space-y-4">
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="space-y-4" suppressHydrationWarning>
               {messages.length === 0 && !streamingResponse ? (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
                   <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center mb-4">
@@ -752,13 +762,18 @@ export default function PracticePage() {
                         )}
                       >
                         <p className="text-[15px] leading-relaxed">{msg.text}</p>
-                        <div className={cn(
-                          'flex items-center gap-2 mt-1 text-xs',
-                          msg.role === 'user' ? 'text-blue-200' : 'text-slate-400'
-                        )}>
+                        <div
+                          className={cn(
+                            'flex items-center gap-2 mt-1 text-xs',
+                            msg.role === 'user' ? 'text-blue-200' : 'text-slate-400'
+                          )}
+                          suppressHydrationWarning
+                        >
                           <Clock className="w-3 h-3" />
-                          {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          {msg.confidence && (
+                          <span suppressHydrationWarning>
+                            {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                          {msg.confidence !== undefined && msg.confidence > 0 && (
                             <span className="ml-2">{Math.round(msg.confidence * 100)}% confidence</span>
                           )}
                         </div>
@@ -781,7 +796,7 @@ export default function PracticePage() {
               )}
               <div ref={messagesEndRef} />
             </div>
-          </ScrollArea>
+          </div>
         </Card>
 
         {/* Controls */}
