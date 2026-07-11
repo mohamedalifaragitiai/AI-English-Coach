@@ -221,16 +221,17 @@ class ConversationSession:
         # Convert bytes to numpy array
         audio = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # Process through VAD
-        result = self.vad.process(audio)
+        # Process through VAD in 512-sample chunks (required by Silero VAD)
+        results = self.vad.process_chunk(audio)
 
-        if result.state == VADState.SPEAKING:
-            self.state = SessionState.LISTENING
-            self._audio_buffer.append(audio)
+        for result in results:
+            if result.state == VADState.SPEAKING:
+                self.state = SessionState.LISTENING
 
-        # Speech ended - process the turn
-        if result.speech_end_time and result.audio_buffer is not None:
-            await self._process_turn(result.audio_buffer)
+            # Speech ended - process the turn
+            if result.speech_end_time and result.audio_buffer is not None:
+                await self._process_turn(result.audio_buffer)
+                break
 
     async def _handle_control(self, message: dict) -> None:
         """Handle control messages.
