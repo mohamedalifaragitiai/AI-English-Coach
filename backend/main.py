@@ -1,0 +1,146 @@
+"""FastAPI application entry point.
+
+Single Uvicorn worker only - multiple workers would duplicate model loads
+and blow VRAM on an 8GB GPU. Concurrency via asyncio.
+"""
+
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.api.users import router as users_router
+from backend.core.event_bus import EventBus
+from backend.core.logging import get_logger, setup_logging
+from backend.core.metrics import get_metrics, get_metrics_content_type
+from backend.core.resource_guard import ResourceGuard
+from backend.persistence import Database, close_database, init_database
+from config.settings import get_settings
+
+logger = get_logger(__name__)
+
+# Global instances (set during lifespan)
+resource_guard: ResourceGuard | None = None
+event_bus: EventBus | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Application lifespan - startup and shutdown."""
+    global resource_guard, event_bus
+
+    settings = get_settings()
+    setup_logging(settings.log_level, json_output=settings.log_level != "DEBUG")
+
+    logger.info(
+        "startup_begin",
+        host=settings.host,
+        port=settings.port,
+        resource_ceiling=settings.resource.ceiling,
+    )
+
+    # Initialize database
+    database = await init_database(settings.database.path)
+    app.state.database = database
+
+    # Initialize resource guard
+    resource_guard = ResourceGuard(
+        ceiling=settings.resource.ceiling,
+        soft=settings.resource.soft,
+        sample_interval=settings.resource.sample_interval,
+        rolling_window=settings.resource.rolling_window,
+        hysteresis_margin=settings.resource.hysteresis_margin,
+    )
+    await resource_guard.start()
+
+    # Initialize event bus
+    event_bus = EventBus()
+    await event_bus.start()
+
+    # Store in app state for dependency injection
+    app.state.resource_guard = resource_guard
+    app.state.event_bus = event_bus
+    app.state.settings = settings
+
+    logger.info(
+        "startup_complete",
+        gpu_available=resource_guard.has_gpu,
+        database_path=str(settings.database.path),
+    )
+
+    yield
+
+    # Shutdown
+    logger.info("shutdown_begin")
+    await event_bus.stop()
+    await resource_guard.stop()
+    await close_database()
+    logger.info("shutdown_complete")
+
+
+def create_app() -> FastAPI:
+    """Create the FastAPI application."""
+    settings = get_settings()
+
+    app = FastAPI(
+        title="English Coach API",
+        description="Fully offline AI English Speaking & Listening Coach",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+
+    # CORS for frontend
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Include API routers
+    app.include_router(users_router)
+
+    @app.get("/")
+    async def root() -> dict:
+        """Health check endpoint."""
+        return {
+            "status": "healthy",
+            "service": "english-coach",
+            "version": "0.1.0",
+        }
+
+    @app.get("/health")
+    async def health() -> dict:
+        """Detailed health check."""
+        guard = app.state.resource_guard
+        snapshot = guard.snapshot() if guard else None
+
+        return {
+            "status": "healthy",
+            "resource_guard": {
+                "running": guard.is_running if guard else False,
+                "gpu_available": guard.has_gpu if guard else False,
+                "degradation_level": guard.degradation_level.name if guard else "UNKNOWN",
+            },
+            "event_bus": {
+                "running": app.state.event_bus.is_running if app.state.event_bus else False,
+                "queue_size": app.state.event_bus.queue_size if app.state.event_bus else 0,
+            },
+            "resources": snapshot.to_dict() if snapshot else None,
+        }
+
+    @app.get("/metrics")
+    async def metrics() -> Response:
+        """Prometheus metrics endpoint."""
+        return Response(
+            content=get_metrics(),
+            media_type=get_metrics_content_type(),
+        )
+
+    return app
+
+
+# Application instance
+app = create_app()
