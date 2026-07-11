@@ -117,7 +117,36 @@ uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 
 # Start server without models (development)
 SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+
+# Start frontend (in separate terminal)
+cd frontend && npm run dev
 ```
+
+## Frontend
+
+The dashboard is built with Next.js 14, TypeScript, Tailwind CSS, and shadcn/ui.
+
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Development server
+npm run dev
+
+# Production build
+npm run build && npm start
+```
+
+Frontend pages:
+- `/` - Dashboard with skill overview and quick actions
+- `/practice` - Live conversation with AI coach (WebSocket)
+- `/plan` - Personalized learning plan
+- `/reports` - Progress reports and gap analysis
+- `/progress` - Detailed progress tracking
+- `/resources` - Study materials
+- `/settings` - User preferences
 
 ## Development Phases
 
@@ -127,5 +156,5 @@ SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 - [x] Phase 3: Hot path (VAD → STT → LLM → TTS)
 - [x] Phase 4: Cold path evaluation & scoring
 - [x] Phase 5: Gap analysis, plans, reports
-- [ ] Phase 6: Dashboard
+- [x] Phase 6: Dashboard
 - [ ] Phase 7: Hardening
