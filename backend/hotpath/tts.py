@@ -29,37 +29,18 @@ class TTSResult:
 
 
 class TTSService:
-    """Text-to-Speech service using Piper.
-
-    Piper is a fast, local neural TTS that runs on CPU.
-    This leaves GPU VRAM available for STT and LLM.
-
-    Usage:
-        tts = TTSService(tts_config, guard)
-
-        # Synthesize to bytes
-        result = await tts.synthesize("Hello, how are you?")
-
-        # Save to file
-        await tts.synthesize_to_file("Hello!", "output.wav")
-    """
+    """Text-to-Speech service using Piper."""
 
     def __init__(
         self,
         tts_config: dict | None,
         guard: ResourceGuard,
     ) -> None:
-        """Initialize TTS service.
-
-        Args:
-            tts_config: Dict with 'model_path' and 'config_path' keys, or None if TTS unavailable
-            guard: ResourceGuard for admission control
-        """
         self.guard = guard
         self.available = False
         self.model_path: Path | None = None
         self.config_path: Path | None = None
-        self.sample_rate = 22050  # Default Piper sample rate
+        self.sample_rate = 22050
         self._voice = None
 
         if tts_config:
@@ -67,7 +48,6 @@ class TTSService:
             self.config_path = Path(tts_config["config_path"])
 
             if self.model_path.exists() and self.config_path.exists():
-                # Read sample rate from config
                 try:
                     with open(self.config_path) as f:
                         config = json.load(f)
@@ -75,19 +55,11 @@ class TTSService:
                 except Exception:
                     pass
 
-                # Load Piper voice
                 try:
                     from piper import PiperVoice
-
                     self._voice = PiperVoice.load(str(self.model_path), str(self.config_path))
                     self.available = True
-                    logger.info(
-                        "tts_initialized",
-                        model=str(self.model_path),
-                        sample_rate=self.sample_rate,
-                    )
-                except ImportError:
-                    logger.error("piper_not_installed", message="Run: uv add piper-tts")
+                    logger.info("tts_initialized", model=str(self.model_path), sample_rate=self.sample_rate)
                 except Exception as e:
                     logger.error("tts_load_error", error=str(e))
             else:
@@ -96,60 +68,43 @@ class TTSService:
             logger.warning("tts_not_configured")
 
     async def synthesize(self, text: str) -> TTSResult | None:
-        """Synthesize text to audio.
-
-        Args:
-            text: Text to synthesize
-
-        Returns:
-            TTSResult with audio bytes, or None if TTS unavailable
-        """
+        """Synthesize text to audio."""
         if not self.available or self._voice is None:
             logger.warning("tts_unavailable")
             return None
 
         if not text or not text.strip():
-            logger.warning("tts_empty_text")
             return None
 
         start_time = time.perf_counter()
 
-        # Request admission (TTS is CPU-based, minimal resources)
         admission = await self.guard.acquire(
             ResourceEstimate(ram_bytes=0.1e9, description="TTS synthesis"),
             path="hot",
         )
 
-        # Under severe pressure, skip TTS
         if admission.degraded and admission.params.get("skip_tts"):
             logger.info("tts_skipped", reason="resource_pressure")
             return None
 
         try:
-            # Synthesize to WAV bytes in memory
+            # Collect audio from generator
+            audio_chunks = []
+            for chunk in self._voice.synthesize(text):
+                audio_chunks.append(chunk.audio_int16_bytes)
+
+            raw_audio = b''.join(audio_chunks)
+
+            # Create WAV in memory
             wav_buffer = io.BytesIO()
-
-            with wave.open(wav_buffer, "wb") as wav_file:
+            with wave.open(wav_buffer, 'wb') as wav_file:
                 wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setsampwidth(2)
                 wav_file.setframerate(self.sample_rate)
-
-                # Synthesize and write audio
-                for audio_bytes in self._voice.synthesize_stream_raw(text):
-                    wav_file.writeframes(audio_bytes)
+                wav_file.writeframes(raw_audio)
 
             audio_bytes = wav_buffer.getvalue()
-            wav_buffer.seek(0)
-
-            # Calculate duration
-            duration = 0.0
-            try:
-                with wave.open(wav_buffer, "rb") as wf:
-                    frames = wf.getnframes()
-                    rate = wf.getframerate()
-                    duration = frames / rate
-            except Exception:
-                pass
+            duration = len(raw_audio) / (self.sample_rate * 2)  # 16-bit = 2 bytes per sample
 
             processing_time = time.perf_counter() - start_time
             hotpath_stage_duration_seconds.labels(stage="tts").observe(processing_time)
@@ -159,7 +114,7 @@ class TTSService:
                 text_len=len(text),
                 audio_size=len(audio_bytes),
                 duration=round(duration, 2),
-                processing_time=round(processing_time, 3),
+                time=round(processing_time, 3),
             )
 
             return TTSResult(
@@ -173,32 +128,6 @@ class TTSService:
             logger.error("tts_error", error=str(e))
             return None
 
-    async def synthesize_to_file(
-        self,
-        text: str,
-        output_path: str | Path,
-    ) -> bool:
-        """Synthesize text directly to a file.
-
-        Args:
-            text: Text to synthesize
-            output_path: Path for output WAV file
-
-        Returns:
-            True if successful
-        """
-        result = await self.synthesize(text)
-        if result is None:
-            return False
-
-        try:
-            Path(output_path).write_bytes(result.audio_bytes)
-            return True
-        except Exception as e:
-            logger.error("tts_save_error", error=str(e))
-            return False
-
     @property
     def is_available(self) -> bool:
-        """Check if TTS is available."""
         return self.available
