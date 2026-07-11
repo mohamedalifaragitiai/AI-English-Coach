@@ -1,0 +1,27 @@
+[Unit]
+Description=English Coach API Server
+After=network.target
+
+[Service]
+Type=simple
+User=english-coach
+Group=english-coach
+WorkingDirectory=/opt/english-coach
+Environment="PATH=/opt/english-coach/.venv/bin"
+ExecStart=/opt/english-coach/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+
+# Resource limits (adjust based on hardware)
+MemoryMax=24G
+CPUQuota=80%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/english-coach/data
+
+[Install]
+WantedBy=multi-user.target
