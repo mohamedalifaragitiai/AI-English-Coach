@@ -11,6 +11,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from backend.api.reports import router as reports_router
 from backend.api.users import router as users_router
 from backend.coldpath import (
     ColdPathOrchestrator,
@@ -169,6 +170,7 @@ def create_app() -> FastAPI:
 
     # Include API routers
     app.include_router(users_router)
+    app.include_router(reports_router)
 
     @app.get("/")
     async def root() -> dict:

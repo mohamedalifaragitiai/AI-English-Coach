@@ -95,6 +95,11 @@ english-coach/
 - `GET /users/{user_id}/skills/{skill}/trend` - Get skill trend over time
 - `POST /users/{user_id}/streak/update` - Update streak
 
+### Reports
+- `GET /users/{user_id}/reports/gaps` - Gap analysis (identifies skill weaknesses)
+- `GET /users/{user_id}/reports/plan` - Generate personalized learning plan
+- `GET /users/{user_id}/reports/progress` - Comprehensive progress report
+
 ## Model Setup
 
 ```bash
@@ -121,6 +126,6 @@ SKIP_MODELS=1 uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
 - [x] Phase 2: Model serving through guard
 - [x] Phase 3: Hot path (VAD → STT → LLM → TTS)
 - [x] Phase 4: Cold path evaluation & scoring
-- [ ] Phase 5: Gap analysis, plans, reports
+- [x] Phase 5: Gap analysis, plans, reports
 - [ ] Phase 6: Dashboard
 - [ ] Phase 7: Hardening
